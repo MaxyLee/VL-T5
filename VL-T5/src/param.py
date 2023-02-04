@@ -55,6 +55,9 @@ def parse_args(parse=True, **optional_kwargs):
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--seed', type=int, default=9595, help='random seed')
+    
+    # Debug
+    parser.add_argument("--debug", action='store_true')
 
     # Data Splits
     parser.add_argument("--train", default='train')
@@ -154,6 +157,9 @@ def parse_args(parse=True, **optional_kwargs):
     parser.add_argument('--RefCOCO_BUTD', action='store_true')
     parser.add_argument("--shuffle_boxes", action='store_true')
     parser.add_argument('--vis_pointer', type=str2bool, default=False)
+    
+    # MMT
+    parser.add_argument('--target', type=str, default=None)
 
     # Multitask
     parser.add_argument("--multitask_sampling", type=str, default='roundrobin')

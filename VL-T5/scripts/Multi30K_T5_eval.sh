@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name              vlt5-vqa-train
+#SBATCH --job-name              t5-mmt-eval
 #SBATCH --partition             gpu-short
 #SBATCH --nodes                 1
 #SBATCH --tasks-per-node        1
 #SBATCH --time                  24:00:00
-#SBATCH --mem                   50G
+#SBATCH --mem                   30G
 #SBATCH --gres                  gpu:1
-#SBATCH --output                /data/home/yc27434/projects/mmt/logs/vlt5-vqa-train.%j.out
-#SBATCH --error                 /data/home/yc27434/projects/mmt/logs/vlt5-vqa-train.%j.err
+#SBATCH --output                /data/home/yc27434/projects/mmt/logs/t5-mmt-eval.%j.out
+#SBATCH --error                 /data/home/yc27434/projects/mmt/logs/t5-mmt-eval.%j.err
 #SBATCH --mail-type		NONE
 #SBATCH --mail-user		yc27434@connect.um.edu.mo
 
@@ -24,28 +24,31 @@ ulimit -s unlimited
 echo $CUDA_VISIBLE_DEVICES
 nvidia-smi
 
+src=en
+tgt=zh
 # The name of experiment
-name=VLT5
+name=T5-$src-$tgt
 
-output=snap/vqa/$name
+output=snap/Multi30K/$name
 
 PYTHONPATH=$PYTHONPATH:./src \
 python -m torch.distributed.launch \
     --nproc_per_node=$1 \
-    src/vqa.py \
+    src/mmt.py \
         --distributed --multiGPU \
-        --train karpathy_train \
-        --valid karpathy_val \
-        --test karpathy_test \
+        --use_vision False \
+        --target $tgt \
+        --test_only \
+        --test multisense \
         --optim adamw \
         --warmup_ratio 0.1 \
         --clip_grad_norm 5 \
-        --lr 5e-5 \
-        --epochs 20 \
         --num_workers 4 \
         --backbone 't5-base' \
         --output $output ${@:2} \
-        --load snap/pretrain/VLT5/Epoch30 \
+        --load $output/BEST \
         --num_beams 5 \
-        --batch_size 20 \
-        --valid_batch_size 100 \
+        --batch_size 30 \
+        --max_text_length 40 \
+        --gen_max_length 40 \
+        --do_lower_case \

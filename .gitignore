@@ -1,5 +1,9 @@
 # Initially taken from Github's Python gitignore file
 
+VL-T5/snap
+VL-T5/wandb
+datasets
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

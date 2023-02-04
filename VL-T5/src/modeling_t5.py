@@ -375,9 +375,8 @@ class VLT5(T5ForConditionalGeneration):
         self.shared = new_embeddings
         self.encoder.set_input_embeddings(new_embeddings)
         self.decoder.set_input_embeddings(new_embeddings)
-
-    def extend_vocab(self, vocab_size):
-
+        
+    def resize_vocab(self, vocab_size):
         new_shared = nn.Embedding(vocab_size, self.config.d_model)
         old_weight = self.shared.weight.data.detach().clone()
         old_vocab_size = old_weight.size(0)
@@ -390,8 +389,6 @@ class VLT5(T5ForConditionalGeneration):
         new_lm_head.weight.data[:old_vocab_size, :] = old_weight
         self.lm_head = new_lm_head
 
-        self.vis_encoder.visual_embedding.obj_order_embedding = self.shared
-
         self.encoder.embed_tokens = self.shared
         self.decoder.embed_tokens = self.shared
 
@@ -399,9 +396,12 @@ class VLT5(T5ForConditionalGeneration):
 
         self.config.vocab_size = vocab_size
         self.encoder.config.vocab_size = vocab_size
-        self.vis_encoder.config.vocab_size = vocab_size
         self.decoder.config.vocab_size = vocab_size
 
+    def print_embedding_sizes(self):
+        print('DEBUG: Embedding sizes')
+        print(self.shared.weight.data.size())
+        print(self.encoder.visual_embedding.obj_order_embedding.weight.data.size())
 
     # @add_start_docstrings_to_callable(T5_INPUTS_DOCSTRING)
     # @replace_return_docstrings(output_type=Seq2SeqLMOutput, config_class=_CONFIG_FOR_DOC)

@@ -7,6 +7,7 @@ import collections
 from pathlib import Path
 from packaging import version
 
+import json
 import numpy as np
 from tqdm import tqdm
 import torch
@@ -15,6 +16,7 @@ import torch.nn as nn
 import logging
 import shutil
 from pprint import pprint
+from transformers import AutoTokenizer
 
 from param import parse_args
 from mmt_data import get_loader
@@ -33,7 +35,7 @@ _use_apex = False
 
 # Check if Pytorch version >= 1.6 to switch between Native AMP and Apex
 if version.parse(torch.__version__) < version.parse("1.6"):
-    from transormers.file_utils import is_apex_available
+    from transformers.file_utils import is_apex_available
     if is_apex_available():
         from apex import amp
     _use_apex = True
@@ -61,6 +63,14 @@ class Trainer(TrainerBase):
 
         config = self.create_config()
         self.tokenizer = self.create_tokenizer()
+        
+        # add chinese tokens
+        if args.target == 'zh':
+            zh_tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
+            new_tokens = set(zh_tokenizer.vocab.keys()) - set(self.tokenizer.vocab.keys())
+            self.tokenizer.add_tokens(list(new_tokens))
+            print(f'Added {len(new_tokens)} new chinese tokens')
+            
         if 'bart' in self.args.tokenizer:
             num_added_toks = 0
             if config.use_vis_order_embedding:
@@ -70,14 +80,16 @@ class Trainer(TrainerBase):
                 num_added_toks = self.tokenizer.add_special_tokens(special_tokens_dict)
 
                 config.default_obj_order_ids = self.tokenizer.convert_tokens_to_ids([f'<vis_extra_id_{i}>' for i in range(100)])
-
+        
         self.model = self.create_model(model_class, config)
 
         if 't5' in self.args.tokenizer:
-            self.model.resize_token_embeddings(self.tokenizer.vocab_size)
+            self.model.resize_token_embeddings(len(self.tokenizer))
+            if args.target == 'zh':
+                self.model.resize_vocab(len(self.tokenizer))
         elif 'bart' in self.args.tokenizer:
             self.model.resize_token_embeddings(self.model.model.shared.num_embeddings + num_added_toks)
-
+        
         self.model.tokenizer = self.tokenizer
 
         # Load Checkpoint
@@ -146,145 +158,149 @@ class Trainer(TrainerBase):
             dist.barrier()
 
         global_step = 0
-        for epoch in range(self.args.epochs):
-            if self.start_epoch is not None:
-                epoch += self.start_epoch
-            self.model.train()
-            if self.args.distributed:
-                self.train_loader.sampler.set_epoch(epoch)
-            if self.verbose:
-                pbar = tqdm(total=len(self.train_loader), ncols=120)
+        if self.training:
+            for epoch in range(self.args.epochs):
+                if self.start_epoch is not None:
+                    epoch += self.start_epoch
+                self.model.train()
+                if self.args.distributed:
+                    self.train_loader.sampler.set_epoch(epoch)
+                if self.verbose:
+                    pbar = tqdm(total=len(self.train_loader), ncols=120)
 
-            epoch_results = {
-                'loss': 0.,
+                epoch_results = {
+                    'loss': 0.,
 
-            }
+                }
 
-            for step_i, batch in enumerate(self.train_loader):
+                for step_i, batch in enumerate(self.train_loader):
 
 
-                # self.optim.zero_grad()
-                if self.args.fp16 and _use_native_amp:
-                    with autocast():
+                    # self.optim.zero_grad()
+                    if self.args.fp16 and _use_native_amp:
+                        with autocast():
+                            if self.args.distributed:
+                                results = self.model.module.train_step(batch)
+                            else:
+                                results = self.model.train_step(batch)
+                    else:
                         if self.args.distributed:
                             results = self.model.module.train_step(batch)
                         else:
                             results = self.model.train_step(batch)
-                else:
-                    if self.args.distributed:
-                        results = self.model.module.train_step(batch)
-                    else:
-                        results = self.model.train_step(batch)
 
-                loss = results['loss']
+                    loss = results['loss']
 
-                # print(f'GPU{self.args.gpu} after loss')
+                    # print(f'GPU{self.args.gpu} after loss')
 
-                if self.args.fp16 and _use_native_amp:
-                    self.scaler.scale(loss).backward()
-                elif self.args.fp16 and _use_apex:
-                    with amp.scale_loss(loss, self.optim) as scaled_loss:
-                        scaled_loss.backward()
-                else:
-                    loss.backward()
-
-                # print(f'GPU{self.args.gpu} after backward')
-
-                loss = loss.detach()
-
-                # Update Parameters
-                if self.args.clip_grad_norm > 0:
                     if self.args.fp16 and _use_native_amp:
-                        self.scaler.unscale_(self.optim)
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), self.args.clip_grad_norm)
+                        self.scaler.scale(loss).backward()
                     elif self.args.fp16 and _use_apex:
-                        torch.nn.utils.clip_grad_norm_(amp.master_params(
-                            self.optim), self.args.clip_grad_norm)
+                        with amp.scale_loss(loss, self.optim) as scaled_loss:
+                            scaled_loss.backward()
                     else:
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), self.args.clip_grad_norm)
+                        loss.backward()
 
-                update = True
-                if self.args.gradient_accumulation_steps > 1:
-                    if step_i == 0:
-                        update = False
-                    elif step_i % self.args.gradient_accumulation_steps == 0 or step_i == len(self.train_loader) - 1:
-                        update = True
-                    else:
-                        update = False
+                    # print(f'GPU{self.args.gpu} after backward')
 
-                if update:
-                    if self.args.fp16 and _use_native_amp:
-                        self.scaler.step(self.optim)
-                        self.scaler.update()
-                    else:
-                        self.optim.step()
+                    loss = loss.detach()
+
+                    # Update Parameters
+                    if self.args.clip_grad_norm > 0:
+                        if self.args.fp16 and _use_native_amp:
+                            self.scaler.unscale_(self.optim)
+                            torch.nn.utils.clip_grad_norm_(
+                                self.model.parameters(), self.args.clip_grad_norm)
+                        elif self.args.fp16 and _use_apex:
+                            torch.nn.utils.clip_grad_norm_(amp.master_params(
+                                self.optim), self.args.clip_grad_norm)
+                        else:
+                            torch.nn.utils.clip_grad_norm_(
+                                self.model.parameters(), self.args.clip_grad_norm)
+
+                    update = True
+                    if self.args.gradient_accumulation_steps > 1:
+                        if step_i == 0:
+                            update = False
+                        elif step_i % self.args.gradient_accumulation_steps == 0 or step_i == len(self.train_loader) - 1:
+                            update = True
+                        else:
+                            update = False
+
+                    if update:
+                        if self.args.fp16 and _use_native_amp:
+                            self.scaler.step(self.optim)
+                            self.scaler.update()
+                        else:
+                            self.optim.step()
+
+                        if self.lr_scheduler:
+                            self.lr_scheduler.step()
+                        # self.model.zero_grad()
+                        for param in self.model.parameters():
+                            param.grad = None
+                        global_step += 1
+
+                    for k, v in results.items():
+                        if k in epoch_results:
+                            epoch_results[k] += v.item()
 
                     if self.lr_scheduler:
-                        self.lr_scheduler.step()
-                    # self.model.zero_grad()
-                    for param in self.model.parameters():
-                        param.grad = None
-                    global_step += 1
-
-                for k, v in results.items():
-                    if k in epoch_results:
-                        epoch_results[k] += v.item()
-
-                if self.lr_scheduler:
-                    if version.parse(torch.__version__) >= version.parse("1.4"):
-                        lr = self.lr_scheduler.get_last_lr()[0]
+                        if version.parse(torch.__version__) >= version.parse("1.4"):
+                            lr = self.lr_scheduler.get_last_lr()[0]
+                        else:
+                            lr = self.lr_scheduler.get_lr()[0]
                     else:
-                        lr = self.lr_scheduler.get_lr()[0]
-                else:
-                    try:
-                        lr = self.optim.get_lr()[0]
-                    except AttributeError:
-                        lr = self.args.lr
+                        try:
+                            lr = self.optim.get_lr()[0]
+                        except AttributeError:
+                            lr = self.args.lr
+
+                    if self.verbose:
+                        loss_meter.update(loss.item())
+                        desc_str = f'Epoch {epoch} | LR {lr:.6f} | Steps {global_step}'
+                        desc_str += f' | Loss {loss_meter.val:4f}'
+                        wandb.log({'Train/loss': loss_meter.val}, step=global_step)
+                        pbar.set_description(desc_str)
+                        pbar.update(1)
+
+                    # if self.args.distributed:
+                    #     dist.barrier()
 
                 if self.verbose:
-                    loss_meter.update(loss.item())
-                    desc_str = f'Epoch {epoch} | LR {lr:.6f} | Steps {global_step}'
-                    desc_str += f' | Loss {loss_meter.val:4f}'
-                    pbar.set_description(desc_str)
-                    pbar.update(1)
+                    pbar.close()
 
-                # if self.args.distributed:
-                #     dist.barrier()
+                    # Validation
+                    results, valid_results = self.evaluate(self.val_loader)
 
-            if self.verbose:
-                pbar.close()
+                    valid_score = valid_results['BLEU']
 
+                    if valid_score > best_valid:
+                        best_valid = valid_score
+                        best_epoch = epoch
+                        self.save("BEST")
 
-                # Validation
-                valid_results = self.evaluate(self.val_loader)
+                    log_str = ''
+                    
+                    if self.args.debug:
+                        log_str += pformat(results)
 
-                valid_score = valid_results['BLEU']
+                    log_str += pformat(valid_results)
+                    log_str += "\nEpoch %d: Valid BLEU %0.4f" % (epoch, valid_score)
+                    log_str += "\nEpoch %d: Best BLEU %0.4f\n" % (best_epoch, best_valid)
+                    
+                    wandb_log_dict = {}
+                    # wandb_log_dict['Train/Loss'] = epoch_results['loss'] / len(self.train_loader)
 
-                if valid_score > best_valid:
-                    best_valid = valid_score
-                    best_epoch = epoch
-                    self.save("BEST")
+                    for score_name, score in valid_results.items():
+                        wandb_log_dict[f'Valid/{score_name}'] = score
 
-                log_str = ''
+                    wandb.log(wandb_log_dict, step=epoch)
 
-                log_str += pformat(valid_results)
-                log_str += "\nEpoch %d: Valid BLEU %0.4f" % (epoch, valid_score)
-                log_str += "\nEpoch %d: Best BLEU %0.4f\n" % (best_epoch, best_valid)
+                    print(log_str)
 
-                wandb_log_dict = {}
-                wandb_log_dict['Train/Loss'] = epoch_results['loss'] / len(self.train_loader)
-
-                for score_name, score in valid_results.items():
-                    wandb_log_dict[f'Valid/{score_name}'] = score
-
-                wandb.log(wandb_log_dict, step=epoch)
-
-                print(log_str)
-
-            if self.args.distributed:
-                dist.barrier()
+                if self.args.distributed:
+                    dist.barrier()
 
         if self.verbose:
             self.save("LAST")
@@ -299,15 +315,20 @@ class Trainer(TrainerBase):
 
                     split = loader.dataset.source
                     dump_path = os.path.join(self.args.output, f'submit_{split}_raw.txt')
-                    test_results = self.evaluate(loader, dump_path=dump_path)
+                    results, test_results = self.evaluate(loader, dump_path=dump_path)
 
                     wandb_log_dict = {}
                     for score_name, score in test_results.items():
                         wandb_log_dict[f'{split}/{score_name}'] = score
-                    wandb.log(wandb_log_dict, step=epoch)
+                    if self.training:
+                        wandb.log(wandb_log_dict, step=epoch)
+                    else:
+                        wandb.log(wandb_log_dict)
 
                     log_str = f'{split} set results\n'
                     log_str += pformat(test_results)
+                    
+                    print(results)
 
                     print(log_str)
 
@@ -315,14 +336,18 @@ class Trainer(TrainerBase):
                     print('\nUploaded', dump_path)
 
             else:
+                loader = self.test_loader
                 split = loader.dataset.source
                 dump_path = os.path.join(self.args.output, f'submit_{split}_raw.txt')
-                test_results = self.evaluate(loader, dump_path=dump_path)
+                results, test_results = self.evaluate(loader, dump_path=dump_path)
 
                 wandb_log_dict = {}
                 for score_name, score in test_results.items():
                     wandb_log_dict[f'{split}/{score_name}'] = score
-                wandb.log(wandb_log_dict, step=epoch)
+                if self.training:
+                    wandb.log(wandb_log_dict, step=epoch)
+                else:
+                    wandb.log(wandb_log_dict)
 
                 log_str = f'{split} set results\n'
                 log_str += pformat(test_results)
@@ -334,7 +359,6 @@ class Trainer(TrainerBase):
 
             wandb.log({'finished': True})
 
-            # exit()
 
         # if self.args.distributed:
         #     dist.barrier()
@@ -390,7 +414,7 @@ class Trainer(TrainerBase):
         predictions = results['predictions']
         targets = results['targets']
         eval_results = evaluator.evaluate(predictions, targets)
-        return eval_results
+        return results, eval_results
 
 def main_worker(gpu, args):
     # GPU is assigned
@@ -402,15 +426,16 @@ def main_worker(gpu, args):
         torch.cuda.set_device(args.gpu)
         dist.init_process_group(backend='nccl')
 
-
-    print(f'Building train loader at GPU {gpu}')
-    train_loader = get_loader(
-        args,
-        split=args.train, mode='train', batch_size=args.batch_size,
-        distributed=args.distributed, gpu=args.gpu,
-        workers=args.num_workers,
-        topk=args.train_topk,
-    )
+    train_loader = None
+    if not args.test_only:
+        print(f'Building train loader at GPU {gpu}')
+        train_loader = get_loader(
+            args,
+            split=args.train, mode='train', batch_size=args.batch_size,
+            distributed=args.distributed, gpu=args.gpu,
+            workers=args.num_workers,
+            topk=args.train_topk,
+        )
 
     if args.valid_batch_size is not None:
         valid_batch_size = args.valid_batch_size
@@ -419,14 +444,15 @@ def main_worker(gpu, args):
 
     val_loader = test_loader = None
     if gpu == 0:
-        print(f'Building val loader at GPU {gpu}')
-        val_loader = get_loader(
-            args,
-            split=args.valid, mode='val', batch_size=valid_batch_size,
-            distributed=False, gpu=args.gpu,
-            workers=4,
-            topk=args.valid_topk,
-        )
+        if not args.test_only:
+            print(f'Building val loader at GPU {gpu}')
+            val_loader = get_loader(
+                args,
+                split=args.valid, mode='val', batch_size=valid_batch_size,
+                distributed=False, gpu=args.gpu,
+                workers=4,
+                topk=args.valid_topk,
+            )
 
         print(f'Building test loader at GPU {gpu}')
         if len(args.test.split(',')) == 1:
@@ -449,8 +475,8 @@ def main_worker(gpu, args):
                     workers=4,
                     topk=args.valid_topk,
                 ))
-
-    trainer = Trainer(args, train_loader, val_loader, test_loader, train=True)
+    training = not args.test_only
+    trainer = Trainer(args, train_loader, val_loader, test_loader, train=training)
     trainer.train()
 
 
@@ -480,5 +506,5 @@ if __name__ == "__main__":
 
         args.run_name = run_name
 
-    if args.distributed:
+    if args.distributed or args.debug:
         main_worker(args.local_rank, args)

@@ -42,6 +42,7 @@ class TrainerBase(object):
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.test_loader = test_loader
+        self.training = train
 
         self.verbose = True
         if self.args.distributed:

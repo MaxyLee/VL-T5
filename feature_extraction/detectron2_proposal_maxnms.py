@@ -17,7 +17,7 @@ from detectron2.config import get_cfg
 from detectron2.engine import DefaultPredictor
 
 
-D2_ROOT = os.path.dirname(os.path.dirname(detectron2.__file__))  # Root of detectron2
+D2_ROOT = os.path.dirname(detectron2.__file__)  # Root of detectron2
 # DATA_ROOT = os.getenv('COCO_IMG_ROOT', '/ssd-playpen/data/mscoco/images/')
 MIN_BOXES = 36
 MAX_BOXES = 36
@@ -156,10 +156,10 @@ def build_model():
     # Find a model from detectron2's model zoo. You can either use the https://dl.fbaipublicfiles.... url, or use the following shorthand
     # cfg.MODEL.WEIGHTS = "http://nlp.cs.unc.edu/models/faster_rcnn_from_caffe.pkl"
     # cfg.MODEL.WEIGHTS = "http://nlp.cs.unc.edu/models/faster_rcnn_from_caffe_attr.pkl"
-    # cfg.MODEL.WEIGHTS = "~/.torch/fvcore_cache/models/faster_rcnn_from_caffe_attr.pkl"
+    cfg.MODEL.WEIGHTS = "/data/home/yc27434/.torch/iopath_cache/models/faster_rcnn_from_caffe_attr.pkl"
     # Path.home().joinpath('.torch/fvcore_cache/models/faster_rcnn_from_caffe_attr.pkl').exists()
     from pathlib import Path
-    cfg.MODEL.WEIGHTS = str(Path.home().joinpath('.torch/fvcore_cache/models/faster_rcnn_from_caffe_attr.pkl'))
+    # cfg.MODEL.WEIGHTS = str(Path.home().joinpath('.torch/fvcore_cache/models/faster_rcnn_from_caffe_attr.pkl'))
     detector = DefaultPredictor(cfg)
     return detector
 

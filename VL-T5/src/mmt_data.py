@@ -15,7 +15,7 @@ from copy import deepcopy
 
 from torch.utils.data.distributed import DistributedSampler
 
-from transformers import T5TokenizerFast, BartTokenizer
+from transformers import T5TokenizerFast, BartTokenizer, AutoTokenizer
 from tokenization import VLT5TokenizerFast
 
 project_dir = Path(__file__).resolve().parent.parent  # VLT5
@@ -29,6 +29,16 @@ flickr30k_dir = dataset_dir.joinpath('flickr30k')
 flickr30k_feature_dir = flickr30k_dir.joinpath('features')
 wmt_data_dir = dataset_dir.joinpath('multi30k-dataset/data/task1/')
 
+mucow_dir = dataset_dir.joinpath('MuCoW')
+mucow_feature_dir = mucow_dir.joinpath('features')
+
+multisense_dir = dataset_dir.joinpath('multisense')
+multisense_feature_dir = multisense_dir.joinpath('features')
+
+lang_map = {
+    'de': 'German',
+    'zh': 'Chinese'
+}
 
 class MMTDataset(Dataset):
     def __init__(self, split='train', raw_dataset=None, rank=-1, topk=-1, verbose=True, args=None, mode='train'):
@@ -73,6 +83,12 @@ class MMTDataset(Dataset):
                 special_tokens_dict = {'additional_special_tokens': additional_special_tokens}
                 num_added_toks = self.tokenizer.add_special_tokens(special_tokens_dict)
 
+        # add chinese tokens
+        if self.args.target == 'zh':
+            zh_tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
+            new_tokens = set(zh_tokenizer.vocab.keys()) - set(self.tokenizer.vocab.keys())
+            self.tokenizer.add_tokens(list(new_tokens))
+
         if self.args.oscar_tags:
             # Load VG Classes
             vg_classes = []
@@ -84,7 +100,7 @@ class MMTDataset(Dataset):
         with open(wmt_data_dir.joinpath(f'raw/{self.source}.en')) as f:
             source_text_list = f.readlines()
 
-        with open(wmt_data_dir.joinpath(f'raw/{self.source}.de')) as f:
+        with open(wmt_data_dir.joinpath(f'raw/{self.source}.{self.args.target}')) as f:
             target_text_list = f.readlines()
 
         with open(wmt_data_dir.joinpath(f'image_splits/{self.source}.txt')) as f:
@@ -125,6 +141,8 @@ class MMTDataset(Dataset):
             'test_2016_flickr': flickr30k_feature_dir.joinpath('trainval_boxes36.h5'),
             'test_2017_flickr': flickr30k_feature_dir.joinpath('test2017_boxes36.h5'),
             'test_2018_flickr': flickr30k_feature_dir.joinpath('test2018_boxes36.h5'),
+            'mucow-mmt': mucow_feature_dir.joinpath('mucow-mmt_boxes36.h5'),
+            'multisense': multisense_feature_dir.joinpath('multisense_boxes36.h5'),
         }
 
 
@@ -182,7 +200,7 @@ class MMTDataset(Dataset):
             out_dict['vis_feats'] = feats[:n_boxes]
 
         ###### Text #####
-        prefix = "translate English to German:"
+        prefix = f"translate English to {lang_map[self.args.target]}:"
         input_tokens = [prefix]
         source_text = datum['source_text']
         input_tokens.append(source_text)
