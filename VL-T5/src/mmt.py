@@ -299,10 +299,10 @@ class Trainer(TrainerBase):
                     
                     wandb_log_dict = {}
                     # wandb_log_dict['Train/Loss'] = epoch_results['loss'] / len(self.train_loader)
-                    wandb_log_dict[f'Valid/BLEU'] = valid_score
+                    # wandb_log_dict[f'Valid/BLEU'] = valid_score
 
-                    # for score_name, score in valid_results.items():
-                    #     wandb_log_dict[f'Valid/{score_name}'] = score
+                    for score_name, score in valid_results.items():
+                        wandb_log_dict[f'Valid/{score_name}'] = score
 
                     wandb.log(wandb_log_dict, step=epoch)
 
@@ -423,7 +423,7 @@ class Trainer(TrainerBase):
         predictions = results['predictions']
         targets = results['targets']
         if self.args.target == 'zh':
-            eval_results = evaluator.evaluate(predictions, targets, tokenize='zh')
+            eval_results = evaluator.evaluate(predictions, targets, tokenize='zh', tokenizer=self.tokenizer)
         else:
             eval_results = evaluator.evaluate(predictions, targets)
         return results, eval_results

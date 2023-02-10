@@ -16,6 +16,7 @@ from copy import deepcopy
 from torch.utils.data.distributed import DistributedSampler
 
 from utils import isEnglish
+import evaluate as hf_evaluate
 from transformers import T5TokenizerFast, BartTokenizer, AutoTokenizer
 from tokenization import VLT5TokenizerFast
 
@@ -397,7 +398,7 @@ class MMTEvaluator:
     def __init__(self):
         pass
 
-    def evaluate(self, predicts, answers, tokenize=None):
+    def evaluate(self, predicts, answers, tokenize=None, tokenizer=None):
         """
         import sacrebleu
 
@@ -417,9 +418,19 @@ class MMTEvaluator:
             print('# preds', len(predicts))
             print('# tgts', len(answers))
             exit()
-        return {
+            
+        meteor = hf_evaluate.load('meteor')
+        
+        if tokenizer is not None:
+            predicts = [' '.join(tokenizer.tokenize(s)) for s in predicts]
+            answers = [' '.join(tokenizer.tokenize(s)) for s in answers]
+        results = meteor.compute(predictions=predicts,references=answers)
+        
+        results.update({
             'BLEU': bleu.score
-        }
+        })
+        
+        return results
 
     # def dump_result(self, quesid2ans: dict, path):
     #     """
