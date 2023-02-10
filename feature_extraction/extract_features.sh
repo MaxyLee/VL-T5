@@ -24,10 +24,17 @@ ulimit -s unlimited
 echo $CUDA_VISIBLE_DEVICES
 nvidia-smi
 
-# DATAROOT=/data/home/yc27434/projects/mmt/data/MuCoW
+ROOT=/data/home/yc27434/projects/mmt
+# DATAROOT=$ROOT/data/MuCoW
 # DATASET_NAME=mucow-mmt
 
-DATAROOT=/data/home/yc27434/projects/mmt/data/multisense
-DATASET_NAME=multisense
+# DATAROOT=$ROOT/data/home/yc27434/projects/mmt/data/multisense
+# DATASET_NAME=multisense
 
-python mmt_proposal.py --dataroot $DATAROOT --dataset_name $DATASET_NAME
+DATAROOT=$ROOT/code/VWSD-MMT/data/mmt/1st
+DATASET=ambig
+
+for split in train val test
+do
+    python mmt_proposal.py --dataroot $DATAROOT --dataset_name $DATASET-$split --image_list $DATAROOT/images-$split.txt
+done

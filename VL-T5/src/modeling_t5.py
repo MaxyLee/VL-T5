@@ -377,6 +377,8 @@ class VLT5(T5ForConditionalGeneration):
         self.decoder.set_input_embeddings(new_embeddings)
         
     def resize_vocab(self, vocab_size):
+        self.resize_token_embeddings(vocab_size)
+        
         new_shared = nn.Embedding(vocab_size, self.config.d_model)
         old_weight = self.shared.weight.data.detach().clone()
         old_vocab_size = old_weight.size(0)

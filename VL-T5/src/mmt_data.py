@@ -15,6 +15,7 @@ from copy import deepcopy
 
 from torch.utils.data.distributed import DistributedSampler
 
+from utils import isEnglish
 from transformers import T5TokenizerFast, BartTokenizer, AutoTokenizer
 from tokenization import VLT5TokenizerFast
 
@@ -34,6 +35,9 @@ mucow_feature_dir = mucow_dir.joinpath('features')
 
 multisense_dir = dataset_dir.joinpath('multisense')
 multisense_feature_dir = multisense_dir.joinpath('features')
+
+ambig_dir = dataset_dir.joinpath('mmt/1st')
+ambig_feature_dir = ambig_dir.joinpath('features')
 
 lang_map = {
     'de': 'German',
@@ -86,7 +90,9 @@ class MMTDataset(Dataset):
         # add chinese tokens
         if self.args.target == 'zh':
             zh_tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
-            new_tokens = set(zh_tokenizer.vocab.keys()) - set(self.tokenizer.vocab.keys())
+            new_tokens = list(set(zh_tokenizer.vocab.keys()) - set(self.tokenizer.vocab.keys()))
+            new_tokens = [s for s in new_tokens if not isEnglish(s)]
+            self.tokenizer.add_tokens(new_tokens)
             self.tokenizer.add_tokens(list(new_tokens))
 
         if self.args.oscar_tags:
@@ -97,14 +103,26 @@ class MMTDataset(Dataset):
                     vg_classes.append(obj.split(',')[0].lower().strip())
             self.vg_classes = vg_classes
 
-        with open(wmt_data_dir.joinpath(f'raw/{self.source}.en')) as f:
-            source_text_list = f.readlines()
+        if self.raw_dataset == 'm30k':
+            with open(wmt_data_dir.joinpath(f'raw/{self.source}.en')) as f:
+                source_text_list = f.readlines()
 
-        with open(wmt_data_dir.joinpath(f'raw/{self.source}.{self.args.target}')) as f:
-            target_text_list = f.readlines()
+            with open(wmt_data_dir.joinpath(f'raw/{self.source}.{self.args.target}')) as f:
+                target_text_list = f.readlines()
 
-        with open(wmt_data_dir.joinpath(f'image_splits/{self.source}.txt')) as f:
-            image_ids = f.readlines()
+            with open(wmt_data_dir.joinpath(f'image_splits/{self.source}.txt')) as f:
+                image_ids = f.readlines()
+        elif self.raw_dataset == 'ambig':
+            with open(ambig_dir.joinpath(f'{self.source}.en')) as f:
+                source_text_list = f.readlines()
+
+            with open(ambig_dir.joinpath(f'{self.source}.{self.args.target}')) as f:
+                target_text_list = f.readlines()
+
+            with open(ambig_dir.joinpath(f'images-{self.source}.txt')) as f:
+                image_ids = f.readlines()
+        else:
+            print(f'No such dataset: {self.raw_dataset}')
 
 
         assert len(source_text_list) == len(target_text_list)
@@ -136,11 +154,14 @@ class MMTDataset(Dataset):
             print("# all sentences:", len(self.data))
 
         self.source_to_h5 = {
-            'train': flickr30k_feature_dir.joinpath('trainval_boxes36.h5'),
-            'val': flickr30k_feature_dir.joinpath('trainval_boxes36.h5'),
-            'test_2016_flickr': flickr30k_feature_dir.joinpath('trainval_boxes36.h5'),
-            'test_2017_flickr': flickr30k_feature_dir.joinpath('test2017_boxes36.h5'),
-            'test_2018_flickr': flickr30k_feature_dir.joinpath('test2018_boxes36.h5'),
+            'm30k-train': flickr30k_feature_dir.joinpath('trainval_boxes36.h5'),
+            'm30k-val': flickr30k_feature_dir.joinpath('trainval_boxes36.h5'),
+            'm30k-test_2016_flickr': flickr30k_feature_dir.joinpath('trainval_boxes36.h5'),
+            'm30k-test_2017_flickr': flickr30k_feature_dir.joinpath('test2017_boxes36.h5'),
+            'm30k-test_2018_flickr': flickr30k_feature_dir.joinpath('test2018_boxes36.h5'),
+            'ambig-train': ambig_feature_dir.joinpath('train_boxes36.h5'),
+            'ambig-val': ambig_feature_dir.joinpath('val_boxes36.h5'),
+            'ambig-test': ambig_feature_dir.joinpath('test_boxes36.h5'),
             'mucow-mmt': mucow_feature_dir.joinpath('mucow-mmt_boxes36.h5'),
             'multisense': multisense_feature_dir.joinpath('multisense_boxes36.h5'),
         }
@@ -161,7 +182,7 @@ class MMTDataset(Dataset):
             img_id = datum['img_id']
             out_dict['img_id'] = img_id
 
-            source = self.source
+            source = f'{self.raw_dataset}-{self.source}'
             f = self.source_to_h5[source]
 
             if isinstance(f, Path):
@@ -330,7 +351,7 @@ class MMTDataset(Dataset):
         return batch_entry
 
 
-def get_loader(args, split='train', mode='train',
+def get_loader(args, split='train', raw_dataset=None, mode='train',
                batch_size=32, workers=4, distributed=False, gpu=0,
                topk=-1):
 
@@ -338,6 +359,7 @@ def get_loader(args, split='train', mode='train',
 
     dataset = MMTDataset(
         split,
+        raw_dataset=raw_dataset,
         rank=gpu,
         topk=topk,
         verbose=verbose,
@@ -375,7 +397,7 @@ class MMTEvaluator:
     def __init__(self):
         pass
 
-    def evaluate(self, predicts, answers):
+    def evaluate(self, predicts, answers, tokenize=None):
         """
         import sacrebleu
 
@@ -390,8 +412,7 @@ class MMTEvaluator:
         """
 
         try:
-            bleu = sacrebleu.corpus_bleu(predicts, answers,
-                                     lowercase=True)
+            bleu = sacrebleu.corpus_bleu(predicts, answers, lowercase=True, tokenize=tokenize)
         except EOFError:
             print('# preds', len(predicts))
             print('# tgts', len(answers))

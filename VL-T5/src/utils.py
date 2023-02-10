@@ -136,3 +136,12 @@ def get_iou(anchors, gt_boxes):
 def xywh_to_xyxy(boxes):
     """Convert [x y w h] box format to [x1 y1 x2 y2] format."""
     return np.hstack((boxes[:, 0:2], boxes[:, 0:2] + boxes[:, 2:4] - 1))
+
+def isEnglish(s):
+    try:
+        s.encode(encoding='utf-8').decode('ascii')
+    except UnicodeDecodeError:
+        return False
+    else:
+        return True
+    

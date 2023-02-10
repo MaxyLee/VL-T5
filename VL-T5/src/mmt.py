@@ -21,7 +21,7 @@ from transformers import AutoTokenizer
 from param import parse_args
 from mmt_data import get_loader
 
-from utils import load_state_dict, LossMeter, set_global_logging_level
+from utils import load_state_dict, LossMeter, set_global_logging_level, isEnglish
 import wandb
 from pprint import pformat
 
@@ -54,22 +54,16 @@ class Trainer(TrainerBase):
             test_loader=test_loader,
             train=train)
 
-        from mmt_model import VLT5MMT, VLBartMMT
+        from mmt_model import VLT5MMT, VLBartMMT, T5MMT
 
         if 't5' in args.backbone:
-            model_class = VLT5MMT
+            model_class = VLT5MMT if args.use_vision else T5MMT
         elif 'bart' in args.backbone:
             model_class = VLBartMMT
 
         config = self.create_config()
         self.tokenizer = self.create_tokenizer()
-        
-        # add chinese tokens
-        if args.target == 'zh':
-            zh_tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
-            new_tokens = set(zh_tokenizer.vocab.keys()) - set(self.tokenizer.vocab.keys())
-            self.tokenizer.add_tokens(list(new_tokens))
-            print(f'Added {len(new_tokens)} new chinese tokens')
+            
             
         if 'bart' in self.args.tokenizer:
             num_added_toks = 0
@@ -81,17 +75,16 @@ class Trainer(TrainerBase):
 
                 config.default_obj_order_ids = self.tokenizer.convert_tokens_to_ids([f'<vis_extra_id_{i}>' for i in range(100)])
         
+        # if self.args.debug:
+        #     import ipdb; ipdb.set_trace()
+            
         self.model = self.create_model(model_class, config)
 
         if 't5' in self.args.tokenizer:
             self.model.resize_token_embeddings(len(self.tokenizer))
-            if args.target == 'zh':
-                self.model.resize_vocab(len(self.tokenizer))
         elif 'bart' in self.args.tokenizer:
             self.model.resize_token_embeddings(self.model.model.shared.num_embeddings + num_added_toks)
         
-        self.model.tokenizer = self.tokenizer
-
         # Load Checkpoint
         self.start_epoch = None
         if args.load is not None:
@@ -100,6 +93,24 @@ class Trainer(TrainerBase):
 
         if self.args.from_scratch:
             self.init_weights()
+            
+        # add chinese tokens
+        if args.target == 'zh':
+            zh_tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
+            new_tokens = list(set(zh_tokenizer.vocab.keys()) - set(self.tokenizer.vocab.keys()))
+            new_tokens = [s for s in new_tokens if not isEnglish(s)]
+            self.tokenizer.add_tokens(new_tokens)
+            print(f'Added {len(new_tokens)} new chinese tokens')
+
+            if self.args.use_vision:
+                self.model.resize_vocab(len(self.tokenizer))
+            else:
+                self.model.resize_token_embeddings(len(self.tokenizer))
+            
+        self.model.tokenizer = self.tokenizer
+        
+        if self.args.debug:
+            return
 
         # GPU Options
         print(f'Model Launching at GPU {self.args.gpu}')
@@ -125,6 +136,9 @@ class Trainer(TrainerBase):
                                 )
         if self.verbose:
             print(f'It took {time() - start:.1f}s')
+            
+        if not os.path.isdir(self.args.output):
+            os.makedirs(self.args.output, exist_ok=True)
 
 
     def train(self):
@@ -170,12 +184,9 @@ class Trainer(TrainerBase):
 
                 epoch_results = {
                     'loss': 0.,
-
                 }
 
                 for step_i, batch in enumerate(self.train_loader):
-
-
                     # self.optim.zero_grad()
                     if self.args.fp16 and _use_native_amp:
                         with autocast():
@@ -281,9 +292,6 @@ class Trainer(TrainerBase):
                         self.save("BEST")
 
                     log_str = ''
-                    
-                    if self.args.debug:
-                        log_str += pformat(results)
 
                     log_str += pformat(valid_results)
                     log_str += "\nEpoch %d: Valid BLEU %0.4f" % (epoch, valid_score)
@@ -291,13 +299,17 @@ class Trainer(TrainerBase):
                     
                     wandb_log_dict = {}
                     # wandb_log_dict['Train/Loss'] = epoch_results['loss'] / len(self.train_loader)
+                    wandb_log_dict[f'Valid/BLEU'] = valid_score
 
-                    for score_name, score in valid_results.items():
-                        wandb_log_dict[f'Valid/{score_name}'] = score
+                    # for score_name, score in valid_results.items():
+                    #     wandb_log_dict[f'Valid/{score_name}'] = score
 
                     wandb.log(wandb_log_dict, step=epoch)
 
                     print(log_str)
+                    
+                    with open(f'{self.args.output}/val-epoch{epoch}.json', 'w') as fout:
+                        json.dump(results['predictions'], fout, indent=4)
 
                 if self.args.distributed:
                     dist.barrier()
@@ -308,11 +320,10 @@ class Trainer(TrainerBase):
             # Test Set
             best_path = os.path.join(self.args.output, 'BEST')
             self.load(best_path)
-
+            
             if isinstance(self.test_loader, list):
 
                 for loader in self.test_loader:
-
                     split = loader.dataset.source
                     dump_path = os.path.join(self.args.output, f'submit_{split}_raw.txt')
                     results, test_results = self.evaluate(loader, dump_path=dump_path)
@@ -327,8 +338,6 @@ class Trainer(TrainerBase):
 
                     log_str = f'{split} set results\n'
                     log_str += pformat(test_results)
-                    
-                    print(results)
 
                     print(log_str)
 
@@ -413,7 +422,10 @@ class Trainer(TrainerBase):
 
         predictions = results['predictions']
         targets = results['targets']
-        eval_results = evaluator.evaluate(predictions, targets)
+        if self.args.target == 'zh':
+            eval_results = evaluator.evaluate(predictions, targets, tokenize='zh')
+        else:
+            eval_results = evaluator.evaluate(predictions, targets)
         return results, eval_results
 
 def main_worker(gpu, args):
@@ -431,7 +443,7 @@ def main_worker(gpu, args):
         print(f'Building train loader at GPU {gpu}')
         train_loader = get_loader(
             args,
-            split=args.train, mode='train', batch_size=args.batch_size,
+            split=args.train, raw_dataset=args.dataset, mode='train', batch_size=args.batch_size,
             distributed=args.distributed, gpu=args.gpu,
             workers=args.num_workers,
             topk=args.train_topk,
@@ -448,7 +460,7 @@ def main_worker(gpu, args):
             print(f'Building val loader at GPU {gpu}')
             val_loader = get_loader(
                 args,
-                split=args.valid, mode='val', batch_size=valid_batch_size,
+                split=args.valid, raw_dataset=args.dataset, mode='val', batch_size=valid_batch_size,
                 distributed=False, gpu=args.gpu,
                 workers=4,
                 topk=args.valid_topk,
@@ -458,7 +470,7 @@ def main_worker(gpu, args):
         if len(args.test.split(',')) == 1:
             test_loader = get_loader(
                 args,
-                split=args.test, mode='val', batch_size=valid_batch_size,
+                split=args.test, raw_dataset=args.dataset, mode='val', batch_size=valid_batch_size,
                 distributed=False, gpu=args.gpu,
                 workers=4,
                 topk=args.valid_topk,
@@ -470,7 +482,7 @@ def main_worker(gpu, args):
             for test_split in args.test.split(','):
                 test_loader.append(get_loader(
                     args,
-                    split=test_split, mode='val', batch_size=valid_batch_size,
+                    split=test_split, raw_dataset=args.dataset, mode='val', batch_size=valid_batch_size,
                     distributed=False, gpu=args.gpu,
                     workers=4,
                     topk=args.valid_topk,
@@ -490,11 +502,11 @@ if __name__ == "__main__":
         print(args)
 
         comments = []
+        if args.comment != '':
+            comments.append(args.comment)
         if args.load is not None:
             ckpt_str = "_".join(args.load.split('/')[-3:])
             comments.append(ckpt_str)
-        if args.comment != '':
-            comments.append(args.comment)
         comment = '_'.join(comments)
 
         from datetime import datetime
@@ -502,7 +514,7 @@ if __name__ == "__main__":
 
         run_name = f'{current_time}_GPU{args.world_size}'
         if len(comments) > 0:
-            run_name += f'_{comment}'
+            run_name = f'{comment}_{run_name}'
 
         args.run_name = run_name
 
