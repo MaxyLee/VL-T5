@@ -40,6 +40,9 @@ multisense_feature_dir = multisense_dir.joinpath('features')
 ambig_dir = dataset_dir.joinpath('mmt/1st')
 ambig_feature_dir = ambig_dir.joinpath('features')
 
+msctd_dir = dataset_dir.joinpath('MSCTD_data/enzh')
+msctd_feature_dir = msctd_dir.joinpath('features')
+
 lang_map = {
     'de': 'German',
     'zh': 'Chinese'
@@ -122,6 +125,16 @@ class MMTDataset(Dataset):
 
             with open(ambig_dir.joinpath(f'images-{self.source}.txt')) as f:
                 image_ids = f.readlines()
+        elif self.raw_dataset == 'msctd':
+            with open(msctd_dir.joinpath(f'{self.source}.en')) as f:
+                source_text_list = f.readlines()
+
+            with open(msctd_dir.joinpath(f'{self.source}.{self.args.target}')) as f:
+                target_text_list = f.readlines()
+
+            # with open(msctd_dir.joinpath(f'image_index_{self.source}.txt')) as f:
+            #     image_ids = f.readlines()
+            image_ids = [str(i) for i in range(len(source_text_list))]
         else:
             print(f'No such dataset: {self.raw_dataset}')
 
@@ -163,6 +176,9 @@ class MMTDataset(Dataset):
             'ambig-train': ambig_feature_dir.joinpath('train_boxes36.h5'),
             'ambig-val': ambig_feature_dir.joinpath('val_boxes36.h5'),
             'ambig-test': ambig_feature_dir.joinpath('test_boxes36.h5'),
+            'msctd-train': msctd_feature_dir.joinpath('train_boxes36.h5'),
+            'msctd-val': msctd_feature_dir.joinpath('val_boxes36.h5'),
+            'msctd-test': msctd_feature_dir.joinpath('test_boxes36.h5'),
             'mucow-mmt': mucow_feature_dir.joinpath('mucow-mmt_boxes36.h5'),
             'multisense': multisense_feature_dir.joinpath('multisense_boxes36.h5'),
         }
@@ -423,8 +439,8 @@ class MMTEvaluator:
         
         if tokenizer is not None:
             predicts = [' '.join(tokenizer.tokenize(s)) for s in predicts]
-            answers = [' '.join(tokenizer.tokenize(s)) for s in answers]
-        results = meteor.compute(predictions=predicts,references=answers)
+            answers = [' '.join(tokenizer.tokenize(s)) for s in answers[0]]
+        results = meteor.compute(predictions=predicts, references=answers)
         
         results.update({
             'BLEU': bleu.score

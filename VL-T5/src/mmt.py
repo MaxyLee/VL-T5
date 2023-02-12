@@ -87,13 +87,14 @@ class Trainer(TrainerBase):
         
         # Load Checkpoint
         self.start_epoch = None
-        if args.load is not None:
+        if args.load is not None and self.training:
             ckpt_path = args.load + '.pth'
             self.load_checkpoint(ckpt_path)
 
         if self.args.from_scratch:
             self.init_weights()
             
+
         # add chinese tokens
         if args.target == 'zh':
             zh_tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
@@ -106,11 +107,8 @@ class Trainer(TrainerBase):
                 self.model.resize_vocab(len(self.tokenizer))
             else:
                 self.model.resize_token_embeddings(len(self.tokenizer))
-            
+
         self.model.tokenizer = self.tokenizer
-        
-        if self.args.debug:
-            return
 
         # GPU Options
         print(f'Model Launching at GPU {self.args.gpu}')
@@ -480,13 +478,22 @@ def main_worker(gpu, args):
             test_loader = []
 
             for test_split in args.test.split(','):
-                test_loader.append(get_loader(
-                    args,
-                    split=test_split, raw_dataset=args.dataset, mode='val', batch_size=valid_batch_size,
-                    distributed=False, gpu=args.gpu,
-                    workers=4,
-                    topk=args.valid_topk,
-                ))
+                if test_split == 'test_ambig':
+                    test_loader.append(get_loader(
+                        args,
+                        split='test', raw_dataset='ambig', mode='val', batch_size=valid_batch_size,
+                        distributed=False, gpu=args.gpu,
+                        workers=4,
+                        topk=args.valid_topk,
+                    ))
+                else:
+                    test_loader.append(get_loader(
+                        args,
+                        split=test_split, raw_dataset=args.dataset, mode='val', batch_size=valid_batch_size,
+                        distributed=False, gpu=args.gpu,
+                        workers=4,
+                        topk=args.valid_topk,
+                    ))
     training = not args.test_only
     trainer = Trainer(args, train_loader, val_loader, test_loader, train=training)
     trainer.train()
