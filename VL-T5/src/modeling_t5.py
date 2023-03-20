@@ -394,7 +394,7 @@ class VLT5(T5ForConditionalGeneration):
         self.encoder.embed_tokens = self.shared
         self.decoder.embed_tokens = self.shared
 
-        self.lm_head.weight = self.shared.weight
+        # self.lm_head.weight = self.shared.weight
 
         self.config.vocab_size = vocab_size
         self.encoder.config.vocab_size = vocab_size

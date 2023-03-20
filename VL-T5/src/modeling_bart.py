@@ -417,6 +417,31 @@ class VLBart(BartForConditionalGeneration):
 
         self.init_weights()
 
+    def resize_vocab(self, vocab_size):
+        self.resize_token_embeddings(vocab_size)
+        
+        new_shared = nn.Embedding(vocab_size, self.config.d_model)
+        old_weight = self.model.shared.weight.data.detach().clone()
+        old_vocab_size = old_weight.size(0)
+        new_shared.weight.data[:old_vocab_size, :] = old_weight
+        self.model.shared = new_shared
+
+        new_lm_head = nn.Linear(self.config.d_model, vocab_size, bias=False)
+        old_weight = self.lm_head.weight.data.detach().clone()
+        old_vocab_size = old_weight.size(0)
+        new_lm_head.weight.data[:old_vocab_size, :] = old_weight
+        self.lm_head = new_lm_head
+
+        self.model.encoder.embed_tokens = self.model.shared
+        self.model.decoder.embed_tokens = self.model.shared
+
+        # self.lm_head.weight = self.shared.weight
+
+        self.config.vocab_size = vocab_size
+        self.model.config.vocab_size = vocab_size
+        self.model.encoder.config.vocab_size = vocab_size
+        self.model.decoder.config.vocab_size = vocab_size
+
     def forward(
         self,
         input_ids=None,

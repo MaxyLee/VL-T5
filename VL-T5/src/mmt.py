@@ -14,14 +14,12 @@ import torch
 import torch.nn as nn
 # from torch.utils.data.dataloader import DataLoader
 import logging
-import shutil
 from pprint import pprint
-from transformers import AutoTokenizer
 
 from param import parse_args
 from mmt_data import get_loader
 
-from utils import load_state_dict, LossMeter, set_global_logging_level, isEnglish
+from utils import load_state_dict, LossMeter, set_global_logging_level
 import wandb
 from pprint import pformat
 
@@ -54,36 +52,32 @@ class Trainer(TrainerBase):
             test_loader=test_loader,
             train=train)
 
-        from mmt_model import VLT5MMT, VLBartMMT, T5MMT
+        from mmt_model import VLT5MMT, VLBartMMT, T5MMT, BartMMT
 
         if 't5' in args.backbone:
             model_class = VLT5MMT if args.use_vision else T5MMT
         elif 'bart' in args.backbone:
-            model_class = VLBartMMT
+            model_class = VLBartMMT if args.use_vision else BartMMT
 
         config = self.create_config()
         self.tokenizer = self.create_tokenizer()
             
-            
         if 'bart' in self.args.tokenizer:
             num_added_toks = 0
-            if config.use_vis_order_embedding:
-                additional_special_tokens = [f'<extra_id_{i}>' for i in range(100-1, -1, -1)] + \
-                        [f'<vis_extra_id_{i}>' for i in range(100-1, -1, -1)]
-                special_tokens_dict = {'additional_special_tokens': additional_special_tokens}
-                num_added_toks = self.tokenizer.add_special_tokens(special_tokens_dict)
+            if config.use_vis_order_embedding and self.args.use_vision:
+                # additional_special_tokens = [f'<extra_id_{i}>' for i in range(100-1, -1, -1)] + [f'<vis_extra_id_{i}>' for i in range(100-1, -1, -1)]
+                # special_tokens_dict = {'additional_special_tokens': additional_special_tokens}
+                # num_added_toks = self.tokenizer.add_special_tokens(special_tokens_dict)
 
                 config.default_obj_order_ids = self.tokenizer.convert_tokens_to_ids([f'<vis_extra_id_{i}>' for i in range(100)])
-        
-        # if self.args.debug:
-        #     import ipdb; ipdb.set_trace()
             
         self.model = self.create_model(model_class, config)
 
-        if 't5' in self.args.tokenizer:
-            self.model.resize_token_embeddings(len(self.tokenizer))
-        elif 'bart' in self.args.tokenizer:
-            self.model.resize_token_embeddings(self.model.model.shared.num_embeddings + num_added_toks)
+        # if 't5' in self.args.tokenizer:
+        #     self.model.resize_token_embeddings(len(self.tokenizer))
+        # elif 'bart' in self.args.tokenizer:
+        #     # self.model.resize_token_embeddings(self.model.model.shared.num_embeddings + num_added_toks)
+        #     self.model.resize_token_embeddings(len(self.tokenizer))
         
         # Load Checkpoint
         self.start_epoch = None
@@ -97,12 +91,6 @@ class Trainer(TrainerBase):
 
         # add chinese tokens
         if args.target == 'zh':
-            zh_tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
-            new_tokens = list(set(zh_tokenizer.vocab.keys()) - set(self.tokenizer.vocab.keys()))
-            new_tokens = [s for s in new_tokens if not isEnglish(s)]
-            self.tokenizer.add_tokens(new_tokens)
-            print(f'Added {len(new_tokens)} new chinese tokens')
-
             if self.args.use_vision:
                 self.model.resize_vocab(len(self.tokenizer))
             else:
@@ -168,7 +156,7 @@ class Trainer(TrainerBase):
 
         if self.args.distributed:
             dist.barrier()
-
+            
         global_step = 0
         if self.training:
             for epoch in range(self.args.epochs):
@@ -273,8 +261,6 @@ class Trainer(TrainerBase):
                         pbar.set_description(desc_str)
                         pbar.update(1)
 
-                    # if self.args.distributed:
-                    #     dist.barrier()
 
                 if self.verbose:
                     pbar.close()
@@ -287,6 +273,7 @@ class Trainer(TrainerBase):
                     if valid_score > best_valid:
                         best_valid = valid_score
                         best_epoch = epoch
+                        self.test(epoch)
                         self.save("BEST")
 
                     log_str = ''
@@ -311,6 +298,7 @@ class Trainer(TrainerBase):
 
                 if self.args.distributed:
                     dist.barrier()
+                    
 
         if self.verbose:
             self.save("LAST")
@@ -319,33 +307,19 @@ class Trainer(TrainerBase):
             best_path = os.path.join(self.args.output, 'BEST')
             self.load(best_path)
             
-            if isinstance(self.test_loader, list):
+            self.test(epoch)
 
-                for loader in self.test_loader:
-                    split = loader.dataset.source
-                    dump_path = os.path.join(self.args.output, f'submit_{split}_raw.txt')
-                    results, test_results = self.evaluate(loader, dump_path=dump_path)
+            wandb.log({'finished': True})
 
-                    wandb_log_dict = {}
-                    for score_name, score in test_results.items():
-                        wandb_log_dict[f'{split}/{score_name}'] = score
-                    if self.training:
-                        wandb.log(wandb_log_dict, step=epoch)
-                    else:
-                        wandb.log(wandb_log_dict)
-
-                    log_str = f'{split} set results\n'
-                    log_str += pformat(test_results)
-
-                    print(log_str)
-
-                    wandb.save(dump_path, base_path=self.args.output)
-                    print('\nUploaded', dump_path)
-
-            else:
-                loader = self.test_loader
+    def test(self, epoch):
+        if isinstance(self.test_loader, list):
+            for i, loader in enumerate(self.test_loader):
                 split = loader.dataset.source
-                dump_path = os.path.join(self.args.output, f'submit_{split}_raw.txt')
+                if i > 0 and self.args.random_image:
+                    fn = f'submit_{split}_random_{i}_raw_{epoch}.txt'
+                else:
+                    fn = f'submit_{split}_raw_{epoch}.txt'
+                dump_path = os.path.join(self.args.output, fn)
                 results, test_results = self.evaluate(loader, dump_path=dump_path)
 
                 wandb_log_dict = {}
@@ -364,9 +338,26 @@ class Trainer(TrainerBase):
                 wandb.save(dump_path, base_path=self.args.output)
                 print('\nUploaded', dump_path)
 
-            wandb.log({'finished': True})
+        else:
+            loader = self.test_loader
+            split = loader.dataset.source
+            fn = f'submit_{split}_raw_{epoch}.txt'
+            dump_path = os.path.join(self.args.output, fn)
+            results, test_results = self.evaluate(loader, dump_path=dump_path)
 
+            wandb_log_dict = {}
+            for score_name, score in test_results.items():
+                wandb_log_dict[f'{split}/{score_name}'] = score
+            if self.training:
+                wandb.log(wandb_log_dict, step=epoch)
+            else:
+                wandb.log(wandb_log_dict)
 
+            log_str = f'{split} set results\n'
+            log_str += pformat(test_results)
+
+            print(log_str)
+        
         # if self.args.distributed:
         #     dist.barrier()
 
@@ -381,16 +372,13 @@ class Trainer(TrainerBase):
             gen_kwargs['num_beams'] = self.args.num_beams
             gen_kwargs['max_length'] = self.args.gen_max_length
 
-            for i, batch in enumerate(tqdm(loader, ncols=120, desc=f"Prediction {loader.dataset.source}")):
+            # for i, batch in enumerate(tqdm(loader, ncols=120, desc=f"Prediction {loader.dataset.source}")):
+            for i, batch in enumerate(tqdm(loader, ncols=120)):
 
                 if self.args.distributed:
-                    results = self.model.module.test_step(
-                        batch,
-                        **gen_kwargs)
+                    results = self.model.module.test_step(batch, **gen_kwargs)
                 else:
-                    results = self.model.test_step(
-                        batch,
-                        **gen_kwargs)
+                    results = self.model.test_step(batch, **gen_kwargs)
 
                 predictions.extend(results['pred'])
 
@@ -456,23 +444,54 @@ def main_worker(gpu, args):
     if gpu == 0:
         if not args.test_only:
             print(f'Building val loader at GPU {gpu}')
-            val_loader = get_loader(
-                args,
-                split=args.valid, raw_dataset=args.dataset, mode='val', batch_size=valid_batch_size,
-                distributed=False, gpu=args.gpu,
-                workers=4,
-                topk=args.valid_topk,
-            )
+            if args.valid == 'val_3am':
+                val_loader = get_loader(
+                    args,
+                    split='val', raw_dataset='3am', mode='val', batch_size=valid_batch_size,
+                    distributed=False, gpu=args.gpu,
+                    workers=4,
+                    topk=args.valid_topk,
+                )
+            else:
+                val_loader = get_loader(
+                    args,
+                    split=args.valid, raw_dataset=args.dataset, mode='val', batch_size=valid_batch_size,
+                    distributed=False, gpu=args.gpu,
+                    workers=4,
+                    topk=args.valid_topk,
+                )
 
         print(f'Building test loader at GPU {gpu}')
         if len(args.test.split(',')) == 1:
-            test_loader = get_loader(
-                args,
-                split=args.test, raw_dataset=args.dataset, mode='val', batch_size=valid_batch_size,
-                distributed=False, gpu=args.gpu,
-                workers=4,
-                topk=args.valid_topk,
-            )
+            if args.test.split == 'test_3am':
+                test_loader = get_loader(
+                    args,
+                    split='test', raw_dataset='3am', mode='val', batch_size=valid_batch_size,
+                    distributed=False, gpu=args.gpu,
+                    workers=4,
+                    topk=args.valid_topk,
+                )
+            else:
+                test_loader = get_loader(
+                    args,
+                    split=args.test, raw_dataset=args.dataset, mode='val', batch_size=valid_batch_size,
+                    distributed=False, gpu=args.gpu,
+                    workers=4,
+                    topk=args.valid_topk,
+                )
+            
+            if args.random_image > 0:
+                test_loader = [test_loader]
+                for i in range(args.random_image):
+                    test_loader.append(get_loader(
+                        args,
+                        split=args.test, raw_dataset=args.dataset, mode='val', batch_size=valid_batch_size,
+                        distributed=False, gpu=args.gpu,
+                        workers=4,
+                        topk=args.valid_topk,
+                        random_image=i,
+                    ))
+                
 
         elif len(args.test.split(',')) > 1:
             test_loader = []
@@ -486,6 +505,14 @@ def main_worker(gpu, args):
                         workers=4,
                         topk=args.valid_topk,
                     ))
+                elif test_split == 'test_3am':
+                    test_loader.append(get_loader(
+                        args,
+                        split='test', raw_dataset='3am', mode='val', batch_size=valid_batch_size,
+                        distributed=False, gpu=args.gpu,
+                        workers=4,
+                        topk=args.valid_topk,
+                    ))
                 else:
                     test_loader.append(get_loader(
                         args,
@@ -494,6 +521,7 @@ def main_worker(gpu, args):
                         workers=4,
                         topk=args.valid_topk,
                     ))
+                    
     training = not args.test_only
     trainer = Trainer(args, train_loader, val_loader, test_loader, train=training)
     trainer.train()
@@ -524,6 +552,7 @@ if __name__ == "__main__":
             run_name = f'{comment}_{run_name}'
 
         args.run_name = run_name
-
+    if args.debug:
+        args.local_rank = 0
     if args.distributed or args.debug:
         main_worker(args.local_rank, args)

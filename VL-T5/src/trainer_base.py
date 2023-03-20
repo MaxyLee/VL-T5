@@ -114,10 +114,10 @@ class TrainerBase(object):
                 # tokenizer_class = T5Tokenizer
                 tokenizer_class = T5TokenizerFast
         elif 'bart' in self.args.tokenizer:
-            tokenizer_class = BartTokenizer
-            # tokenizer_class = BartTokenizerFast
+            # tokenizer_class = BartTokenizer
+            tokenizer_class = BartTokenizerFast
 
-        tokenizer_name = self.args.backbone
+        tokenizer_name = self.args.tokenizer or self.args.backbone
 
         tokenizer = tokenizer_class.from_pretrained(
             tokenizer_name,
@@ -229,7 +229,7 @@ class TrainerBase(object):
                 new_key = 'module.model.encoder.' + key[len("module.model.vis_encoder."):]
                 state_dict[new_key] = state_dict.pop(key)
 
-        results = self.model.load_state_dict(state_dict, strict=False)
+        results = self.model.load_state_dict(state_dict, strict=True)
         if self.verbose:
             print('Model loaded from ', path)
             pprint(results)

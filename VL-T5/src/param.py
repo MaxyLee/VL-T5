@@ -161,6 +161,7 @@ def parse_args(parse=True, **optional_kwargs):
     # MMT
     parser.add_argument('--target', type=str, default=None)
     parser.add_argument('--dataset', type=str, default=None)
+    parser.add_argument('--random_image', type=int, default=0)
 
     # Multitask
     parser.add_argument("--multitask_sampling", type=str, default='roundrobin')

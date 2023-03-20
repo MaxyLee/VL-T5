@@ -1,5 +1,6 @@
 import sacrebleu
-from torch.utils.data import DataLoader, Dataset, Sampler
+import random
+from torch.utils.data import DataLoader, Dataset, Sampler, ConcatDataset
 from pathlib import Path
 from collections import defaultdict
 import json
@@ -17,7 +18,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from utils import isEnglish
 import evaluate as hf_evaluate
-from transformers import T5TokenizerFast, BartTokenizer, AutoTokenizer
+from transformers import T5TokenizerFast, BartTokenizerFast, AutoTokenizer
 from tokenization import VLT5TokenizerFast
 
 project_dir = Path(__file__).resolve().parent.parent  # VLT5
@@ -43,13 +44,16 @@ ambig_feature_dir = ambig_dir.joinpath('features')
 msctd_dir = dataset_dir.joinpath('MSCTD_data/enzh')
 msctd_feature_dir = msctd_dir.joinpath('features')
 
+am_dir = dataset_dir.joinpath('mmt/2nd')
+am_feature_dir = am_dir.joinpath('features')
+
 lang_map = {
     'de': 'German',
     'zh': 'Chinese'
 }
 
 class MMTDataset(Dataset):
-    def __init__(self, split='train', raw_dataset=None, rank=-1, topk=-1, verbose=True, args=None, mode='train'):
+    def __init__(self, split='train', raw_dataset=None, rank=-1, topk=-1, verbose=True, args=None, mode='train', random_image=None):
         super().__init__()
 
         self.raw_dataset = raw_dataset
@@ -58,46 +62,29 @@ class MMTDataset(Dataset):
         self.args = args
 
         self.mode = mode
+        self.random_image = random_image
 
         # Loading datasets to data
         self.source = split
         if self.verbose:
             print('Data source: ', self.source)
 
-
-        if self.args.tokenizer is None:
-            self.args.tokenizer = self.args.backbone
-
-        if 't5' in self.args.tokenizer:
+        if 't5' in self.args.backbone:
             if self.args.use_vision:
                 self.tokenizer = VLT5TokenizerFast.from_pretrained(
-                    args.backbone,
+                    self.args.tokenizer,
                     # max_length=self.args.max_text_length,
                     do_lower_case=self.args.do_lower_case)
             else:
                 self.tokenizer = T5TokenizerFast.from_pretrained(
-                    args.backbone,
+                    self.args.tokenizer,
                     # max_length=self.args.max_text_length,
                     do_lower_case=self.args.do_lower_case)
-        elif 'bart' in self.args.tokenizer:
-            self.tokenizer = BartTokenizer.from_pretrained(
-                args.backbone,
+        elif 'bart' in self.args.backbone:
+            self.tokenizer = BartTokenizerFast.from_pretrained(
+                self.args.tokenizer,
                 # max_length=self.args.max_text_length,
                 do_lower_case=self.args.do_lower_case)
-
-            if args.use_vis_order_embedding:
-                additional_special_tokens = [f'<extra_id_{i}>' for i in range(100-1, -1, -1)] + \
-                        [f'<vis_extra_id_{i}>' for i in range(100-1, -1, -1)]
-                special_tokens_dict = {'additional_special_tokens': additional_special_tokens}
-                num_added_toks = self.tokenizer.add_special_tokens(special_tokens_dict)
-
-        # add chinese tokens
-        if self.args.target == 'zh':
-            zh_tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
-            new_tokens = list(set(zh_tokenizer.vocab.keys()) - set(self.tokenizer.vocab.keys()))
-            new_tokens = [s for s in new_tokens if not isEnglish(s)]
-            self.tokenizer.add_tokens(new_tokens)
-            self.tokenizer.add_tokens(list(new_tokens))
 
         if self.args.oscar_tags:
             # Load VG Classes
@@ -135,12 +122,25 @@ class MMTDataset(Dataset):
             # with open(msctd_dir.joinpath(f'image_index_{self.source}.txt')) as f:
             #     image_ids = f.readlines()
             image_ids = [str(i) for i in range(len(source_text_list))]
+        elif self.raw_dataset == '3am':
+            with open(am_dir.joinpath(f'{self.source}.en')) as f:
+                source_text_list = f.readlines()
+
+            with open(am_dir.joinpath(f'{self.source}.{self.args.target}')) as f:
+                target_text_list = f.readlines()
+
+            with open(am_dir.joinpath(f'images-{self.source}.txt')) as f:
+                image_ids = f.readlines()
         else:
             print(f'No such dataset: {self.raw_dataset}')
 
 
         assert len(source_text_list) == len(target_text_list)
         assert len(source_text_list) == len(image_ids)
+        
+        if self.random_image:
+            random.seed(self.random_image)
+            random.shuffle(image_ids)
 
         data = []
         for source_text, target_text, image_id in zip(source_text_list, target_text_list, image_ids):
@@ -176,12 +176,17 @@ class MMTDataset(Dataset):
             'ambig-train': ambig_feature_dir.joinpath('train_boxes36.h5'),
             'ambig-val': ambig_feature_dir.joinpath('val_boxes36.h5'),
             'ambig-test': ambig_feature_dir.joinpath('test_boxes36.h5'),
+            '3am-train': am_feature_dir.joinpath('train_boxes36.h5'),
+            '3am-val': am_feature_dir.joinpath('val_boxes36.h5'),
+            '3am-test': am_feature_dir.joinpath('test_boxes36.h5'),
             'msctd-train': msctd_feature_dir.joinpath('train_boxes36.h5'),
             'msctd-val': msctd_feature_dir.joinpath('val_boxes36.h5'),
             'msctd-test': msctd_feature_dir.joinpath('test_boxes36.h5'),
             'mucow-mmt': mucow_feature_dir.joinpath('mucow-mmt_boxes36.h5'),
             'multisense': multisense_feature_dir.joinpath('multisense_boxes36.h5'),
         }
+                
+            
 
 
     def __len__(self):
@@ -208,16 +213,21 @@ class MMTDataset(Dataset):
                 # self.split_to_h5_features[split_i] = f
                 self.source_to_h5[source] = f
 
-            # Normalize the boxes (to 0 ~ 1)
-            img_h = f[f'{img_id}/img_h'][()]
-            img_w = f[f'{img_id}/img_w'][()]
-            boxes = f[f'{img_id}/boxes'][()]  # (x1, y1, x2, y2)
-            boxes[:, (0, 2)] /= img_w
-            boxes[:, (1, 3)] /= img_h
-            np.testing.assert_array_less(boxes, 1+1e-5)
-            # np.testing.assert_array_less(boxes, 1+5e-2)
-            np.testing.assert_array_less(-boxes, 0+1e-5)
-            boxes = torch.from_numpy(boxes)
+            try:
+                # Normalize the boxes (to 0 ~ 1)
+                img_h = f[f'{img_id}/img_h'][()]
+                img_w = f[f'{img_id}/img_w'][()]
+                boxes = f[f'{img_id}/boxes'][()]  # (x1, y1, x2, y2)
+                boxes[:, (0, 2)] /= img_w
+                boxes[:, (1, 3)] /= img_h
+                np.testing.assert_array_less(boxes, 1+1e-5)
+                # np.testing.assert_array_less(boxes, 1+5e-2)
+                np.testing.assert_array_less(-boxes, 0+1e-5)
+                boxes = torch.from_numpy(boxes)
+            except:
+                import ipdb; ipdb.set_trace()
+            #     print(idx)
+            #     print(img_id)
 
             boxes.clamp_(min=0.0, max=1.0)
 
@@ -367,21 +377,54 @@ class MMTDataset(Dataset):
 
         return batch_entry
 
-
 def get_loader(args, split='train', raw_dataset=None, mode='train',
                batch_size=32, workers=4, distributed=False, gpu=0,
-               topk=-1):
+               topk=-1, random_image=None):
 
     verbose = (gpu == 0)
 
-    dataset = MMTDataset(
-        split,
-        raw_dataset=raw_dataset,
-        rank=gpu,
-        topk=topk,
-        verbose=verbose,
-        args=args,
-        mode=mode)
+    if raw_dataset == 'm30k-3am':
+        if split in ['train', 'val']:
+            m30k_dataset = MMTDataset(
+                split,
+                raw_dataset='m30k',
+                rank=gpu,
+                topk=topk,
+                verbose=verbose,
+                args=args,
+                mode=mode)
+            am_dataset = MMTDataset(
+                split,
+                raw_dataset='3am',
+                rank=gpu,
+                topk=topk,
+                verbose=verbose,
+                args=args,
+                mode=mode)
+            collate_fn = m30k_dataset.collate_fn
+            dataset = ConcatDataset([m30k_dataset, am_dataset])
+
+        elif split in ['test_2016_flickr', 'test_2017_flickr']:
+            dataset = MMTDataset(
+                split,
+                raw_dataset='m30k',
+                rank=gpu,
+                topk=topk,
+                verbose=verbose,
+                args=args,
+                mode=mode)
+            collate_fn = dataset.collate_fn
+    else:
+        dataset = MMTDataset(
+            split,
+            raw_dataset=raw_dataset,
+            rank=gpu,
+            topk=topk,
+            verbose=verbose,
+            args=args,
+            mode=mode,
+            random_image=random_image)
+        collate_fn = dataset.collate_fn
 
     if distributed and mode == 'train':
         train_sampler = DistributedSampler(dataset)
@@ -392,14 +435,14 @@ def get_loader(args, split='train', raw_dataset=None, mode='train',
         loader = DataLoader(
             dataset, batch_size=batch_size, shuffle=(train_sampler is None),
             num_workers=workers, pin_memory=True, sampler=train_sampler,
-            collate_fn=dataset.collate_fn)
+            collate_fn=collate_fn)
     else:
         loader = DataLoader(
             dataset,
             batch_size=batch_size, shuffle=False,
             num_workers=workers, pin_memory=True,
             sampler=None,
-            collate_fn=dataset.collate_fn,
+            collate_fn=collate_fn,
             drop_last=False)
 
     if verbose:
@@ -435,16 +478,18 @@ class MMTEvaluator:
             print('# tgts', len(answers))
             exit()
             
-        meteor = hf_evaluate.load('meteor')
+        results = {
+            'BLEU': bleu.score
+        }
+            
         
         if tokenizer is not None:
+            meteor = hf_evaluate.load('meteor')
             predicts = [' '.join(tokenizer.tokenize(s)) for s in predicts]
             answers = [' '.join(tokenizer.tokenize(s)) for s in answers[0]]
-        results = meteor.compute(predictions=predicts, references=answers)
+            results.update(meteor.compute(predictions=predicts, references=answers))
         
-        results.update({
-            'BLEU': bleu.score
-        })
+        
         
         return results
 
